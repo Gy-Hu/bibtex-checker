@@ -1,6 +1,6 @@
 # bibtex-checker
 
-Utility script that verifies BibTeX entries against the Semantic Scholar proxy API. API can be accessed at https://lifuai.com/.
+Utility script that verifies BibTeX entries against the Semantic Scholar proxy API. API can be accessed at https://lifuai.com/. Recommend to use claude desktop to **filter out the unused bibtex entries** (feeding the .aux and .bib files) **at first**.
 
 ## Requirements
 
