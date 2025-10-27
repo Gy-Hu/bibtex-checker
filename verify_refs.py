@@ -14,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 import bibtexparser
 
@@ -37,6 +38,7 @@ class VerificationResult:
     matched_title: str | None = None
     matched_year: int | None = None
     matched_id: str | None = None
+    api_data: dict[str, t.Any] | None = None
 
 
 class SemanticScholarClient:
@@ -215,6 +217,7 @@ def verify_entry(entry: BibEntry, client: SemanticScholarClient) -> Verification
             matched_title=api_title,
             matched_year=match_year,
             matched_id=matched_id,
+            api_data=t.cast(dict[str, t.Any], response),
         )
 
     if expected_year and match_year and expected_year != match_year:
@@ -225,6 +228,7 @@ def verify_entry(entry: BibEntry, client: SemanticScholarClient) -> Verification
             matched_title=api_title,
             matched_year=match_year,
             matched_id=matched_id,
+            api_data=t.cast(dict[str, t.Any], response),
         )
 
     return VerificationResult(
@@ -234,6 +238,7 @@ def verify_entry(entry: BibEntry, client: SemanticScholarClient) -> Verification
         matched_title=api_title,
         matched_year=match_year,
         matched_id=matched_id,
+        api_data=t.cast(dict[str, t.Any], response),
     )
 
 
@@ -250,6 +255,7 @@ def run(args: argparse.Namespace) -> int:
         backoff_seconds=args.backoff,
     )
     counters: dict[str, int] = {"verified": 0, "mismatch": 0, "not_found": 0, "error": 0, "skipped": 0}
+    failed_logs: list[str] = []
 
     for entry in entries:
         result = verify_entry(entry, client)
@@ -273,15 +279,109 @@ def run(args: argparse.Namespace) -> int:
             print(f"     API year: {result.matched_year}")
         if result.matched_id:
             print(f"     API id: {result.matched_id}")
+        if args.failure_log and result.status in {"mismatch", "not_found", "error"}:
+            failed_logs.append(_format_failure_log_entry(result))
         if result.status in {"mismatch", "not_found", "error"} and args.stop_on_failure:
             print("Stopping early due to failure.", file=sys.stderr)
             break
+
+    if args.failure_log and failed_logs:
+        _write_failure_log(args.failure_log, failed_logs)
 
     print("\nSummary:")
     for status in ("verified", "mismatch", "not_found", "error", "skipped"):
         count = counters.get(status, 0)
         print(f"  {status:9s}: {count:3d}")
     return 0
+
+
+def _write_failure_log(path: str, blocks: list[str]) -> None:
+    target = Path(path)
+    if not target.parent.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n\n".join(blocks).rstrip() + "\n"
+    target.write_text(content, encoding="utf-8")
+
+
+def _format_failure_log_entry(result: VerificationResult) -> str:
+    entry = result.entry
+    kind = entry.kind or "misc"
+    key = entry.key or "unnamed"
+    header = f"% Failure: {key} [{result.status}] - {result.message}"
+    original = _disable_bibtex_entry(_format_bibtex_entry(kind, key, entry.fields))
+    corrected_fields = _build_corrected_fields(result)
+    if corrected_fields:
+        corrected = _format_bibtex_entry(kind, key, corrected_fields)
+    else:
+        corrected = "% No corrected BibTeX suggestion available (missing API data)."
+    return "\n".join([header, original, corrected])
+
+
+def _build_corrected_fields(result: VerificationResult) -> dict[str, str] | None:
+    if not result.api_data:
+        return None
+    fields: dict[str, str] = {
+        name: _coerce_field_value(value) for name, value in result.entry.fields.items()
+    }
+
+    def set_field(name: str, value: t.Any | None) -> None:
+        if value is None:
+            return
+        text = str(value)
+        if fields.get(name) != text:
+            fields[name] = text
+
+    set_field("title", result.matched_title)
+    if result.matched_year:
+        set_field("year", result.matched_year)
+    external_ids = result.api_data.get("externalIds") or {}
+    doi = external_ids.get("DOI")
+    set_field("doi", doi)
+    set_field("url", result.api_data.get("url"))
+    venue = result.api_data.get("venue")
+    if venue:
+        for candidate in ("journal", "booktitle", "venue"):
+            if candidate in fields:
+                set_field(candidate, venue)
+                break
+        else:
+            set_field("venue", venue)
+    return fields
+
+
+def _format_bibtex_entry(
+    kind: str, key: str, fields: dict[str, t.Union[str, list[str]]]
+) -> str:
+    items = []
+    for name, value in fields.items():
+        if isinstance(value, list):
+            formatted = " and ".join(str(item) for item in value)
+        else:
+            formatted = str(value)
+        items.append((name, formatted))
+    lines = [f"@{kind}{{{key},"]
+    for index, (name, value) in enumerate(items):
+        suffix = "," if index < len(items) - 1 else ""
+        lines.append(f"  {name} = {{{value}}}{suffix}")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _disable_bibtex_entry(text: str) -> str:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("@"):
+            leading = line[: len(line) - len(stripped)]
+            lines[index] = f"{leading}{stripped[1:]}"
+            break
+    return "\n".join(lines)
+
+
+def _coerce_field_value(value: t.Union[str, list[str]]) -> str:
+    if isinstance(value, list):
+        return " and ".join(str(item) for item in value)
+    return str(value)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -322,6 +422,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Stop processing after the first mismatch/not_found/error.",
     )
+    parser.add_argument(
+        "--failure-log",
+        default="corrected.bib",
+        help="Path to write corrected BibTeX suggestions for failed entries "
+        "(default: corrected.bib). Use an empty string to disable.",
+    )
     args = parser.parse_args(argv)
     if args.api_key is None:
         args.api_key = _env_api_key()
@@ -329,6 +435,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(
             "No API key provided. Use --api-key or set the LIFUAI_API_KEY environment variable."
         )
+    if args.failure_log == "":
+        args.failure_log = None
     return args
 
 

@@ -36,11 +36,3 @@ The commands below assume the virtual environment is active. You can also prefix
    ```
 
    Drop `--stop-on-failure` to review every citation; adjust `--delay`, `--max-retries`, and `--backoff` if you encounter rate limits.
-
-## Current Verification Status
-
-- The command above verified the first 15 entries and halted on `Russo2017` due to the known year mismatch (API reports 2017 vs. BibTeX 2018).
-
-## Next Steps
-
-1. Re-run without `--stop-on-failure` to review remaining mismatches (e.g., vendor manuals and the Thompson Sampling survey) and decide which fields need updates or skips.
