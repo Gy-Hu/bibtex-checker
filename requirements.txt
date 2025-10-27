@@ -1,0 +1,2 @@
+# Dependencies for running the BibTeX verification script
+bibtexparser>=1.4.0
