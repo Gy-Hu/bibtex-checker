@@ -35,4 +35,4 @@ The commands below assume the virtual environment is active. You can also prefix
    python verify_refs.py --bib-path refs.bib --delay 1 --stop-on-failure
    ```
 
-   Drop `--stop-on-failure` to review every citation; adjust `--delay`, `--max-retries`, and `--backoff` if you encounter rate limits.
+   Drop `--stop-on-failure` to review every citation; adjust `--delay`, `--max-retries`, and `--backoff` if you encounter rate limits. Using `--no-author-check` and `--no-venue-check` can also help reduce failures.

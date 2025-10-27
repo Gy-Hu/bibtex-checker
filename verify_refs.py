@@ -10,6 +10,7 @@ import re
 import sys
 import time
 import typing as t
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,7 +21,17 @@ import bibtexparser
 
 
 BASE_URL = "https://lifuai.com/api/v1/graph/v1/"
-DEFAULT_FIELDS = "title,year,venue,externalIds,url,publicationTypes"
+DEFAULT_FIELDS = "title,year,venue,externalIds,url,publicationTypes,authors,publicationVenue"
+AUTHOR_MATCH_THRESHOLD = 0.5
+VENUE_SIMILARITY_THRESHOLD = 0.6
+
+
+@dataclass
+class VerificationConfig:
+    author_check: bool = True
+    author_threshold: float = AUTHOR_MATCH_THRESHOLD
+    venue_check: bool = True
+    venue_threshold: float = VENUE_SIMILARITY_THRESHOLD
 
 
 @dataclass
@@ -167,6 +178,10 @@ def normalize_title(text: str | None) -> str:
     return re.sub(r"\s+", " ", stripped).lower()
 
 
+def _clamp(value: float, min_value: float = 0.0, max_value: float = 1.0) -> float:
+    return max(min_value, min(max_value, value))
+
+
 def compare_titles(bib_title: str | None, api_title: str | None) -> float:
     import difflib
 
@@ -177,9 +192,76 @@ def compare_titles(bib_title: str | None, api_title: str | None) -> float:
     return difflib.SequenceMatcher(None, norm_a, norm_b).ratio()
 
 
-def verify_entry(entry: BibEntry, client: SemanticScholarClient) -> VerificationResult:
+def _canonical_author(name: str) -> str:
+    if not name:
+        return ""
+    name = name.replace("{", "").replace("}", "").replace("\n", " ").strip()
+    if not name:
+        return ""
+    if "," in name:
+        last, _, rest = name.partition(",")
+    else:
+        parts = name.split()
+        if not parts:
+            return ""
+        last = parts[-1]
+        rest = " ".join(parts[:-1])
+    return f"{_strip_author_token(last)},{_strip_author_token(rest)}"
+
+
+def _strip_author_token(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if ch.isalnum())
+    return text.lower()
+
+
+def _split_bibtex_authors(author_field: str | None) -> list[str]:
+    if not author_field:
+        return []
+    cleaned = author_field.replace("\n", " ")
+    authors = [part.strip() for part in re.split(r"\s+and\s+", cleaned)]
+    return [author for author in authors if author]
+
+
+def _canonicalize_authors(names: list[str]) -> list[str]:
+    return [canon for name in names if (canon := _canonical_author(name))]
+
+
+def _author_match_ratio(bib_authors: list[str], api_authors: list[str]) -> float:
+    if not bib_authors or not api_authors:
+        return 1.0
+    bib_set = set(bib_authors)
+    api_set = set(api_authors)
+    matches = len(bib_set & api_set)
+    return matches / max(len(bib_set), len(api_set))
+
+
+def _api_author_names(api_data: dict[str, t.Any]) -> list[str]:
+    authors = t.cast(list[dict[str, t.Any]], api_data.get("authors") or [])
+    names = [str(author.get("name", "")).strip() for author in authors if author.get("name")]
+    return [name for name in names if name]
+
+
+def _api_venue_name(api_data: dict[str, t.Any]) -> str | None:
+    venue = api_data.get("venue")
+    if venue:
+        return str(venue)
+    publication_venue = api_data.get("publicationVenue") or {}
+    if isinstance(publication_venue, dict):
+        name = publication_venue.get("name")
+        if name:
+            return str(name)
+    return None
+
+
+def verify_entry(
+    entry: BibEntry,
+    client: SemanticScholarClient,
+    config: VerificationConfig,
+) -> VerificationResult:
     doi = first_field(entry.fields, "doi")
     title = first_field(entry.fields, "title")
+    authors_field = first_field(entry.fields, "author")
     year_raw = first_field(entry.fields, "year")
     expected_year = None
     if year_raw:
@@ -208,6 +290,7 @@ def verify_entry(entry: BibEntry, client: SemanticScholarClient) -> Verification
     similarity = compare_titles(title, api_title)
     match_year = response.get("year")
     matched_id = response.get("paperId") or response.get("externalIds", {}).get("DOI")
+    api_data = t.cast(dict[str, t.Any], response)
 
     if similarity < 0.75:
         return VerificationResult(
@@ -217,7 +300,7 @@ def verify_entry(entry: BibEntry, client: SemanticScholarClient) -> Verification
             matched_title=api_title,
             matched_year=match_year,
             matched_id=matched_id,
-            api_data=t.cast(dict[str, t.Any], response),
+            api_data=api_data,
         )
 
     if expected_year and match_year and expected_year != match_year:
@@ -228,8 +311,49 @@ def verify_entry(entry: BibEntry, client: SemanticScholarClient) -> Verification
             matched_title=api_title,
             matched_year=match_year,
             matched_id=matched_id,
-            api_data=t.cast(dict[str, t.Any], response),
+            api_data=api_data,
         )
+
+    if config.author_check:
+        bib_authors = _canonicalize_authors(_split_bibtex_authors(authors_field))
+        api_authors = _canonicalize_authors(_api_author_names(api_data))
+        author_overlap = _author_match_ratio(bib_authors, api_authors)
+        if author_overlap < config.author_threshold:
+            return VerificationResult(
+                entry,
+                "mismatch",
+                (
+                    f"Author overlap {author_overlap:.2f} below threshold "
+                    f"{config.author_threshold:.2f}"
+                ),
+                matched_title=api_title,
+                matched_year=match_year,
+                matched_id=matched_id,
+                api_data=api_data,
+            )
+
+    bib_venue = (
+        first_field(entry.fields, "journal")
+        or first_field(entry.fields, "booktitle")
+        or first_field(entry.fields, "venue")
+    )
+    if config.venue_check:
+        api_venue = _api_venue_name(api_data)
+        if bib_venue and api_venue:
+            venue_similarity = compare_titles(bib_venue, api_venue)
+            if venue_similarity < config.venue_threshold:
+                return VerificationResult(
+                    entry,
+                    "mismatch",
+                    (
+                        f"Venue similarity {venue_similarity:.2f} below threshold "
+                        f"{config.venue_threshold:.2f}; API venue: {api_venue!r}"
+                    ),
+                    matched_title=api_title,
+                    matched_year=match_year,
+                    matched_id=matched_id,
+                    api_data=api_data,
+                )
 
     return VerificationResult(
         entry,
@@ -238,7 +362,7 @@ def verify_entry(entry: BibEntry, client: SemanticScholarClient) -> Verification
         matched_title=api_title,
         matched_year=match_year,
         matched_id=matched_id,
-        api_data=t.cast(dict[str, t.Any], response),
+        api_data=api_data,
     )
 
 
@@ -254,11 +378,17 @@ def run(args: argparse.Namespace) -> int:
         max_retries=args.max_retries,
         backoff_seconds=args.backoff,
     )
+    config = VerificationConfig(
+        author_check=args.author_check,
+        author_threshold=_clamp(args.author_threshold),
+        venue_check=args.venue_check,
+        venue_threshold=_clamp(args.venue_threshold),
+    )
     counters: dict[str, int] = {"verified": 0, "mismatch": 0, "not_found": 0, "error": 0, "skipped": 0}
     failed_logs: list[str] = []
 
     for entry in entries:
-        result = verify_entry(entry, client)
+        result = verify_entry(entry, client, config)
         counters[result.status] = counters.get(result.status, 0) + 1
         prefix = {
             "verified": "[OK]",
@@ -279,6 +409,13 @@ def run(args: argparse.Namespace) -> int:
             print(f"     API year: {result.matched_year}")
         if result.matched_id:
             print(f"     API id: {result.matched_id}")
+        if result.status != "verified" and result.api_data:
+            api_authors = _api_author_names(result.api_data)
+            if api_authors:
+                print(f"     API authors: {', '.join(api_authors)}")
+            api_venue = _api_venue_name(result.api_data)
+            if api_venue:
+                print(f"     API venue: {api_venue}")
         if args.failure_log and result.status in {"mismatch", "not_found", "error"}:
             failed_logs.append(_format_failure_log_entry(result))
         if result.status in {"mismatch", "not_found", "error"} and args.stop_on_failure:
@@ -338,7 +475,10 @@ def _build_corrected_fields(result: VerificationResult) -> dict[str, str] | None
     doi = external_ids.get("DOI")
     set_field("doi", doi)
     set_field("url", result.api_data.get("url"))
-    venue = result.api_data.get("venue")
+    api_authors = _api_author_names(result.api_data)
+    if api_authors:
+        set_field("author", " and ".join(api_authors))
+    venue = _api_venue_name(result.api_data)
     if venue:
         for candidate in ("journal", "booktitle", "venue"):
             if candidate in fields:
@@ -427,6 +567,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="corrected.bib",
         help="Path to write corrected BibTeX suggestions for failed entries "
         "(default: corrected.bib). Use an empty string to disable.",
+    )
+    parser.add_argument(
+        "--author-check",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Enable/disable author overlap verification (default: enabled).",
+    )
+    parser.add_argument(
+        "--author-threshold",
+        type=float,
+        default=AUTHOR_MATCH_THRESHOLD,
+        help=(
+            "Minimum required author overlap ratio when author checking is enabled "
+            f"(default: {AUTHOR_MATCH_THRESHOLD})."
+        ),
+    )
+    parser.add_argument(
+        "--venue-check",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Enable/disable venue similarity verification (default: enabled).",
+    )
+    parser.add_argument(
+        "--venue-threshold",
+        type=float,
+        default=VENUE_SIMILARITY_THRESHOLD,
+        help=(
+            "Minimum required venue similarity when venue checking is enabled "
+            f"(default: {VENUE_SIMILARITY_THRESHOLD})."
+        ),
     )
     args = parser.parse_args(argv)
     if args.api_key is None:
