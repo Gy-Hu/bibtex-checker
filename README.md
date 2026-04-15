@@ -1,11 +1,11 @@
 # bibtex-checker
 
-Utility script that verifies BibTeX entries against the Semantic Scholar proxy API. API can be accessed at https://lifuai.com/. Recommend to use claude desktop to **filter out the unused bibtex entries** (feeding the .aux and .bib files) **at first**.
+Utility script that verifies BibTeX entries against the Semantic Scholar proxy API. API can be accessed at https://ai4scholar.net/. Recommend to use claude desktop to **filter out the unused bibtex entries** (feeding the .aux and .bib files) **at first**.
 
 ## Requirements
 
 - Python 3.9 or newer
-- Semantic Scholar proxy API key (set `LIFUAI_API_KEY` or pass `--api-key`)
+- Semantic Scholar proxy API key (set `AI4SCHOLAR_API_KEY` or pass `--api-key`)
 
 Install the single runtime dependency with:
 
@@ -28,7 +28,11 @@ The commands below assume the virtual environment is active. You can also prefix
 
 ## Usage
 
-1. Provide your API key via `export LIFUAI_API_KEY=...` or `--api-key`.
+1. Provide your API key in one of three ways (checked in this order):
+   - `--api-key` flag on the command line
+   - `AI4SCHOLAR_API_KEY` environment variable (`export AI4SCHOLAR_API_KEY=...`)
+   - A `.env` file next to `verify_refs.py` containing `AI4SCHOLAR_API_KEY=...`
+     (copy `.env.example` to `.env` and fill in your key — `.env` is git-ignored)
 2. Run the verifier against your BibTeX file:
 
    ```bash

@@ -20,7 +20,7 @@ from pathlib import Path
 import bibtexparser
 
 
-BASE_URL = "https://lifuai.com/api/v1/graph/v1/"
+BASE_URL = "https://ai4scholar.net/graph/v1/"
 DEFAULT_FIELDS = "title,year,venue,externalIds,url,publicationTypes,authors,publicationVenue"
 AUTHOR_MATCH_THRESHOLD = 0.5
 VENUE_SIMILARITY_THRESHOLD = 0.6
@@ -537,7 +537,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--api-key",
         default=None,
         help="API key for the Semantic Scholar proxy. "
-        "If omitted, the LIFUAI_API_KEY environment variable is used.",
+        "If omitted, the AI4SCHOLAR_API_KEY environment variable is used.",
     )
     parser.add_argument(
         "--delay",
@@ -603,15 +603,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.api_key = _env_api_key()
     if not args.api_key:
         parser.error(
-            "No API key provided. Use --api-key or set the LIFUAI_API_KEY environment variable."
+            "No API key provided. Use --api-key or set the AI4SCHOLAR_API_KEY environment variable."
         )
     if args.failure_log == "":
         args.failure_log = None
     return args
 
 
+def _load_dotenv() -> None:
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
 def _env_api_key() -> str | None:
-    return os.environ.get("LIFUAI_API_KEY")
+    _load_dotenv()
+    return os.environ.get("AI4SCHOLAR_API_KEY")
 
 
 def main(argv: list[str] | None = None) -> int:
